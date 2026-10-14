@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Yandex Disk Downloader</title>
+<style>
+  :root { --bg:#fafafa; --fg:#222; --mut:#777; --line:#e2e2e2; --ok:#2e9e4f; --bad:#c33; --warn:#d98a00; --card:#fff; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#16181b; --fg:#e8e8e8; --mut:#999; --line:#2c3035; --card:#1e2125; } }
+  body { margin:0; background:var(--bg); color:var(--fg); font:15px -apple-system, "Segoe UI", sans-serif; }
+  main { max-width:960px; margin:0 auto; padding:20px 16px 60px; }
+  h1 { font-size:20px; margin:0 0 14px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px; margin-bottom:14px; }
+  textarea, input, select { width:100%; box-sizing:border-box; padding:8px; border:1px solid var(--line); border-radius:6px; background:var(--bg); color:var(--fg); font:inherit; }
+  textarea { height:80px; }
+  .row { display:flex; gap:10px; flex-wrap:wrap; margin-top:10px; align-items:end; }
+  .row > div { flex:1; min-width:140px; }
+  label { display:block; font-size:12px; color:var(--mut); margin-bottom:3px; }
+  button { padding:8px 14px; border:1px solid var(--line); border-radius:6px; background:var(--card); color:var(--fg); font:inherit; cursor:pointer; }
+  button.primary { background:var(--ok); border-color:var(--ok); color:#fff; }
+  .bar { height:10px; background:var(--line); border-radius:5px; overflow:hidden; display:flex; }
+  .bar i { display:block; height:100%; }
+  .big .bar { height:16px; }
+  .ok { background:var(--ok); } .pv { background:var(--warn); } .bd { background:var(--bad); }
+  table { width:100%; border-collapse:collapse; }
+  td, th { padding:8px 6px; border-bottom:1px solid var(--line); text-align:left; vertical-align:middle; }
+  th { font-size:12px; color:var(--mut); font-weight:600; }
+  .num b { font-weight:600; } .e { color:var(--bad); } .p { color:var(--warn); } .g { color:var(--ok); }
+  .mut { color:var(--mut); font-size:13px; }
+  pre { font-size:12px; white-space:pre-wrap; color:var(--bad); margin:6px 0 0; max-height:180px; overflow:auto; }
+  .stats { display:flex; gap:18px; flex-wrap:wrap; margin:8px 0 10px; }
+  .stats div span { display:block; font-size:12px; color:var(--mut); }
+  .stats div b { font-size:18px; }
+  .name { max-width:260px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Yandex Disk Downloader</h1>
+
+  <div class="card">
+    <label>Публичные ссылки (по одной в строке или через пробел)</label>
+    <textarea id="links" placeholder="https://disk.yandex.ru/d/..."></textarea>
+    <div class="row">
+      <div style="flex:3"><label>Папка для сохранения</label><input id="dest"></div>
+      <div><label>Потоков</label><input id="threads" type="number" min="1" max="64"></div>
+      <div><label>Папки</label>
+        <select id="mode"><option value="parallel">все сразу</option><option value="sequential">по очереди</option></select></div>
+      <div style="flex:0"><button class="primary" id="add">Скачать</button></div>
+    </div>
+  </div>
+
+  <div class="card big">
+    <div class="stats">
+      <div><span>Скачано</span><b id="s-ok">0</b></div>
+      <div><span>Осталось</span><b id="s-left">0</b></div>
+      <div><span>Ошибок</span><b class="e" id="s-bad">0</b></div>
+      <div><span>Только превью</span><b class="p" id="s-pv">0</b></div>
+      <div><span>Объём</span><b id="s-bytes">0</b></div>
+      <div><span>Скорость</span><b id="s-speed">0</b></div>
+      <div><span>Осталось времени</span><b id="s-eta">—</b></div>
+    </div>
+    <div class="bar" id="total-bar"></div>
+    <div class="row">
+      <button id="pause">Пауза</button>
+      <button id="retry">Повторить неудавшиеся</button>
+      <a href="/api/failed.csv"><button type="button">Список ошибок (CSV)</button></a>
+      <span class="mut" id="status" style="align-self:center"></span>
+    </div>
+  </div>
+
+  <div class="card">
+    <table>
+      <thead><tr><th>Папка</th><th>Скачано · осталось · ошибок</th><th>Объём</th><th style="width:30%">Прогресс</th></tr></thead>
+      <tbody id="jobs"></tbody>
+    </table>
+  </div>
+
+  <div class="card">
+    <div class="mut">Последние ошибки</div>
+    <pre id="errors">нет</pre>
+  </div>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const fmt = b => b < 1073741824 ? (b/1048576).toFixed(0) + ' МБ' : (b/1073741824).toFixed(2) + ' ГБ';
+const post = (p, body) => fetch(p, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body||{})});
+const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+let inited = false;
+
+function bar(total, ok, pv, bad) {
+  const w = x => total ? (x/total*100).toFixed(2) : 0;
+  return `<i class="ok" style="width:${w(ok)}%"></i><i class="pv" style="width:${w(pv)}%"></i><i class="bd" style="width:${w(bad)}%"></i>`;
+}
+
+async function tick() {
+  let s;
+  try { s = await (await fetch('/api/state')).json(); } catch (e) { $('status').textContent = 'нет связи с программой'; return; }
+  const t = s.totals, ok = t.ok||0, bad = t.failed||0, pv = t.preview||0, left = t.pending||0;
+  if (!inited) { $('dest').value = s.settings.dest; $('threads').value = s.settings.threads; $('mode').value = s.settings.mode; inited = true; }
+  $('s-ok').textContent = ok; $('s-left').textContent = left; $('s-bad').textContent = bad; $('s-pv').textContent = pv;
+  $('s-bytes').textContent = fmt(t.bytes_ok||0) + ' / ' + fmt(t.bytes_all||0);
+  $('s-speed').textContent = (s.speed/1048576).toFixed(2) + ' МБ/с';
+  $('s-eta').textContent = s.eta ? (s.eta > 5400 ? (s.eta/3600).toFixed(1) + ' ч' : Math.ceil(s.eta/60) + ' мин') : '—';
+  $('total-bar').innerHTML = bar(ok+bad+pv+left, ok, pv, bad);
+  $('pause').textContent = s.paused ? 'Продолжить' : 'Пауза';
+  $('status').textContent = (s.paused ? 'на паузе · ' : '') + 'в работе файлов: ' + s.running;
+  $('jobs').innerHTML = s.jobs.map(j => `<tr>
+    <td class="name" title="${esc(j.url)}">${esc(j.name)}${j.state==='listing'?' <span class="mut">(читаю список…)</span>':''}${j.state==='error'?` <span class="e">(${esc(j.err)})</span>`:''}</td>
+    <td class="num"><b class="g">✓ ${j.ok}</b> · осталось <b>${j.left}</b> · <b class="${j.failed?'e':'mut'}">ошибок ${j.failed}</b>${j.preview?` · <span class="p">превью ${j.preview}</span>`:''}</td>
+    <td class="mut">${fmt(j.bytes_ok)} / ${fmt(j.bytes_all)}</td>
+    <td><div class="bar">${bar(j.total, j.ok, j.preview, j.failed)}</div></td></tr>`).join('');
+  $('errors').textContent = s.errors.length ? s.errors.join('\n') : 'нет';
+}
+
+$('add').onclick = async () => {
+  const links = $('links').value.trim(); if (!links) return;
+  await post('/api/settings', {dest: $('dest').value, threads: +$('threads').value, mode: $('mode').value});
+  await post('/api/add', {links, dest: $('dest').value});
+  $('links').value = ''; tick();
+};
+$('pause').onclick = async () => { const paused = $('pause').textContent === 'Продолжить'; await post(paused ? '/api/resume' : '/api/pause'); tick(); };
+$('retry').onclick = async () => { await post('/api/retry'); tick(); };
+$('threads').onchange = () => post('/api/settings', {threads: +$('threads').value});
+$('mode').onchange = () => post('/api/settings', {mode: $('mode').value});
+tick(); setInterval(tick, 2000);
+</script>
+</body>
+</html>
